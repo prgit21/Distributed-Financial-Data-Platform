@@ -1,0 +1,151 @@
+version: "3.9"
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.3
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.3
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.7.0
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_SERVER: kafka:9092
+    ports:
+      - "9308:9308"
+
+  cockroachdb-node1:
+    image: cockroachdb/cockroach:v23.2.5
+    command: start --insecure --advertise-addr=cockroachdb-node1 --join=cockroachdb-node1,cockroachdb-node2,cockroachdb-node3
+    hostname: cockroachdb-node1
+    volumes:
+      - cockroach-node1:/cockroach/cockroach-data
+    ports:
+      - "26257:26257"
+      - "8080:8080"
+
+  cockroachdb-node2:
+    image: cockroachdb/cockroach:v23.2.5
+    command: start --insecure --advertise-addr=cockroachdb-node2 --join=cockroachdb-node1,cockroachdb-node2,cockroachdb-node3
+    hostname: cockroachdb-node2
+    volumes:
+      - cockroach-node2:/cockroach/cockroach-data
+
+  cockroachdb-node3:
+    image: cockroachdb/cockroach:v23.2.5
+    command: start --insecure --advertise-addr=cockroachdb-node3 --join=cockroachdb-node1,cockroachdb-node2,cockroachdb-node3
+    hostname: cockroachdb-node3
+    volumes:
+      - cockroach-node3:/cockroach/cockroach-data
+
+  cockroach-init:
+    image: cockroachdb/cockroach:v23.2.5
+    depends_on:
+      - cockroachdb-node1
+      - cockroachdb-node2
+      - cockroachdb-node3
+    command: init --insecure --host=cockroachdb-node1
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: financial
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  prometheus:
+    image: prom/prometheus:v2.49.1
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana-oss:10.3.3
+    depends_on:
+      - prometheus
+      - postgres
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+
+  ingestion-worker:
+    build:
+      context: ./ingestion
+      dockerfile: Dockerfile
+    depends_on:
+      - kafka
+      - prometheus
+    environment:
+      KAFKA_BROKER: kafka:9092
+      YFINANCE_SYMBOLS: AAPL,MSFT,GOOGL
+      ALPHAVANTAGE_API_KEY: "demo"
+      QUANDL_API_KEY: "demo"
+      METRICS_PORT: "8000"
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+
+  node-exporter:
+    image: quay.io/prometheus/node-exporter:v1.8.2
+    restart: unless-stopped
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/host'
+      - '--collector.filesystem.ignored-mount-points=^/(dev|proc|sys|var/lib/docker/.+|host/var/lib/docker/.+)($$|/)'
+    ports:
+      - "9100:9100"
+
+
+volumes:
+  cockroach-node1:
+  cockroach-node2:
+  cockroach-node3:
+  postgres-data:
+  grafana-data:
