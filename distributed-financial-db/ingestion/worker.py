@@ -295,7 +295,12 @@ def _iter_yfinance_payloads() -> Iterable[Dict[str, Any]]:
     for symbol in YFINANCE_SYMBOLS:
         if not symbol:
             continue
-        yield fetch_with_retry("yfinance", fetch_yfinance_quote, symbol)
+        try:
+            yield fetch_with_retry("yfinance", fetch_yfinance_quote, symbol)
+        except Exception as exc:  # pylint: disable=broad-except
+            LOGGER.error(
+                "Skipping symbol %s after failed fetch: %s", symbol, exc
+            )
 
 
 def run_worker(stop_event: threading.Event) -> None:
