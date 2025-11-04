@@ -1,4 +1,4 @@
-"""Ingestion worker for fetching vendor market data and publishing to Kafka."""
+"""Ingestion worker for fetching vendor market data (Binance) and publishing to Kafka."""
 
 from __future__ import annotations
 
@@ -9,13 +9,19 @@ import signal
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
-import yfinance as yf
+import requests
 from kafka import KafkaProducer
 from prometheus_client import Counter, Histogram, start_http_server
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
+# -----------------------------
+# Logging
+# -----------------------------
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s",
@@ -23,6 +29,9 @@ logging.basicConfig(
 LOGGER = logging.getLogger(__name__)
 
 
+# -----------------------------
+# Env helpers
+# -----------------------------
 def _parse_env_list(env_var: str, default: str = "") -> List[str]:
     value = os.getenv(env_var, default)
     if not value:
@@ -30,89 +39,79 @@ def _parse_env_list(env_var: str, default: str = "") -> List[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
-YFINANCE_SYMBOLS = _parse_env_list("YFINANCE_SYMBOLS")
-METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
+def _parse_kafka_api_version() -> Optional[Tuple[int, ...]]:
+    raw = os.getenv("KAFKA_API_VERSION", "2.5.0")  # from your broker logs
+    try:
+        parts = tuple(int(p) for p in raw.split("."))
+        return parts if parts else None
+    except Exception:
+        return None
 
-YFINANCE_TOPIC = os.getenv("YFINANCE_TOPIC", "market-data-yfinance")
+
+# -----------------------------
+# Configuration
+# -----------------------------
+KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
+
+# Try these hosts in order until one returns valid JSON (no cross-host redirect)
+BINANCE_HOSTS: List[str] = _parse_env_list(
+    "BINANCE_HOSTS",
+    "data-api.binance.vision,api.binance.com,api1.binance.com,api-gcp.binance.com,api.binance.us",
+)
+BINANCE_PATH = os.getenv("BINANCE_PATH", "/api/v3/ticker/24hr")
+
+BINANCE_SYMBOLS = _parse_env_list("BINANCE_SYMBOLS") or _parse_env_list("YFINANCE_SYMBOLS")
+
+METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
+MARKET_DATA_TOPIC = os.getenv("MARKET_DATA_TOPIC") or os.getenv("YFINANCE_TOPIC", "market-data-binance")
 
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "60"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 RETRY_BACKOFF_SECONDS = float(os.getenv("RETRY_BACKOFF_SECONDS", "2"))
 FLUSH_EVERY = int(os.getenv("FLUSH_EVERY", "5"))
 
+KAFKA_API_VERSION = _parse_kafka_api_version()
+KAFKA_CONNECT_RETRIES = int(os.getenv("KAFKA_CONNECT_RETRIES", "30"))
+KAFKA_CONNECT_INITIAL_DELAY = float(os.getenv("KAFKA_CONNECT_INITIAL_DELAY", "1.0"))
+KAFKA_CONNECT_MAX_DELAY = float(os.getenv("KAFKA_CONNECT_MAX_DELAY", "5.0"))
 
-FETCH_SUCCESS = Counter(
-    "vendor_fetch_success_total",
-    "Number of successful vendor fetch operations",
-    labelnames=("vendor",),
-)
-FETCH_FAILURE = Counter(
-    "vendor_fetch_failure_total",
-    "Number of failed vendor fetch operations",
-    labelnames=("vendor",),
-)
-FETCH_LATENCY = Histogram(
-    "vendor_fetch_latency_seconds",
-    "Latency of vendor fetch operations",
-    labelnames=("vendor",),
-)
-PUBLISH_SUCCESS = Counter(
-    "kafka_publish_success_total",
-    "Number of successful Kafka publish operations",
-    labelnames=("vendor",),
-)
-PUBLISH_FAILURE = Counter(
-    "kafka_publish_failure_total",
-    "Number of failed Kafka publish operations",
-    labelnames=("vendor",),
-)
+HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "15"))
+HTTP_TOTAL_RETRIES = int(os.getenv("HTTP_TOTAL_RETRIES", "2"))  # per-host before rotation
 
 
+# -----------------------------
+# Prometheus metrics
+# -----------------------------
+FETCH_SUCCESS = Counter("vendor_fetch_success_total", "Number of successful vendor fetch operations", ["vendor"])
+FETCH_FAILURE = Counter("vendor_fetch_failure_total", "Number of failed vendor fetch operations", ["vendor"])
+FETCH_LATENCY = Histogram("vendor_fetch_latency_seconds", "Latency of vendor fetch operations", ["vendor"])
+PUBLISH_SUCCESS = Counter("kafka_publish_success_total", "Number of successful Kafka publish operations", ["vendor"])
+PUBLISH_FAILURE = Counter("kafka_publish_failure_total", "Number of failed Kafka publish operations", ["vendor"])
+BINANCE_HTTP_ERRORS = Counter("binance_http_errors_total", "HTTP errors from Binance (status codes)", ["status_code"])
+BINANCE_HOST_ATTEMPTS = Counter("binance_host_attempts_total", "Attempts made against a given Binance host", ["host"])
+
+
+# -----------------------------
+# Utils
+# -----------------------------
 def _to_float(value: Any) -> Optional[float]:
     try:
-        if value is None:
+        if value is None or value == "":
             return None
         return float(value)
     except (TypeError, ValueError):
         return None
 
 
-def _create_producer() -> KafkaProducer:
-    LOGGER.info("Connecting KafkaProducer to %s", KAFKA_BROKER)
-    return KafkaProducer(
-        bootstrap_servers=[KAFKA_BROKER],
-        value_serializer=lambda value: json.dumps(value).encode("utf-8"),
-        key_serializer=lambda value: value.encode("utf-8") if value else None,
-    )
-
-
-def _normalize_payload(
-    vendor: str,
-    symbol: str,
-    timestamp: Optional[str],
-    pricing: Dict[str, Any],
-) -> Dict[str, Any]:
-    return {
-        "vendor": vendor,
-        "symbol": symbol,
-        "timestamp": timestamp or datetime.utcnow().isoformat(),
-        "open": _to_float(pricing.get("open")),
-        "high": _to_float(pricing.get("high")),
-        "low": _to_float(pricing.get("low")),
-        "close": _to_float(pricing.get("close"))
-        or _to_float(pricing.get("price")),
-        "price": _to_float(pricing.get("price"))
-        or _to_float(pricing.get("close")),
-        "volume": _to_float(pricing.get("volume")),
-        "currency": pricing.get("currency"),
-        "raw": pricing,
-    }
-
-
 def _coerce_timestamp(value: Any) -> Optional[str]:
     if value is None:
         return None
+    if isinstance(value, (int, float)):
+        try:
+            ts = value / 1000.0 if value > 1e12 else float(value)  # ms -> s
+            return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        except (OverflowError, ValueError):
+            return None
     if hasattr(value, "to_pydatetime"):
         value = value.to_pydatetime()
     if isinstance(value, datetime):
@@ -124,134 +123,216 @@ def _coerce_timestamp(value: Any) -> Optional[str]:
     return None
 
 
-def _safe_get_fast_info(symbol: str, ticker: yf.Ticker) -> Dict[str, Any]:
-    try:
-        fast_info = ticker.get_fast_info()
-    except AttributeError:
-        try:
-            fast_info = ticker.fast_info
-        except Exception:  # pylint: disable=broad-except
-            LOGGER.debug("fast_info lookup failed for %s", symbol, exc_info=True)
-            fast_info = None
-    except Exception:  # pylint: disable=broad-except
-        LOGGER.debug("get_fast_info failed for %s", symbol, exc_info=True)
-        fast_info = None
-
-    if not fast_info:
-        return {}
-
-    if hasattr(fast_info, "as_dict"):
-        info_dict = fast_info.as_dict()
-    elif isinstance(fast_info, dict):
-        info_dict = fast_info
-    else:
-        info_dict = getattr(fast_info, "_data", {}) or {}
-
-    serializable: Dict[str, Any] = {}
-    for key, value in info_dict.items():
-        try:
-            serializable[key] = value.item() if hasattr(value, "item") else value
-        except Exception:  # pylint: disable=broad-except
-            continue
-    return serializable
-
-
-def _pricing_from_fast_info(info_dict: Dict[str, Any]) -> Dict[str, Any]:
-    if not info_dict:
-        return {}
+def _normalize_payload(vendor: str, symbol: str, timestamp: Optional[str], pricing: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "price": info_dict.get("last_price")
-        or info_dict.get("regular_market_price"),
-        "open": info_dict.get("regular_market_open")
-        or info_dict.get("previous_close"),
-        "high": info_dict.get("day_high")
-        or info_dict.get("regular_market_day_high"),
-        "low": info_dict.get("day_low")
-        or info_dict.get("regular_market_day_low"),
-        "close": info_dict.get("previous_close")
-        or info_dict.get("last_price"),
-        "volume": info_dict.get("last_volume")
-        or info_dict.get("regular_market_volume"),
-        "currency": info_dict.get("currency")
-        or info_dict.get("regular_market_currency"),
+        "vendor": vendor,
+        "symbol": symbol,
+        "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
+        "open": _to_float(pricing.get("open")),
+        "high": _to_float(pricing.get("high")),
+        "low": _to_float(pricing.get("low")),
+        "close": _to_float(pricing.get("close")) or _to_float(pricing.get("price")),
+        "price": _to_float(pricing.get("price")) or _to_float(pricing.get("close")),
+        "volume": _to_float(pricing.get("volume")),
+        "currency": pricing.get("currency"),
+        "raw": pricing,
     }
 
 
-def _history_snapshot(symbol: str, ticker: yf.Ticker) -> Optional[Dict[str, Any]]:
-    try:
-        history = ticker.history(period="5d", interval="1d")
-    except Exception:  # pylint: disable=broad-except
-        LOGGER.debug("history lookup failed for %s", symbol, exc_info=True)
-        return None
-
-    if history.empty:
-        return None
-
-    latest = history.dropna(how="all")
-    if latest.empty:
-        return None
-    latest_row = latest.iloc[-1]
-
-    pricing = {
-        "open": latest_row.get("Open"),
-        "high": latest_row.get("High"),
-        "low": latest_row.get("Low"),
-        "close": latest_row.get("Close"),
-        "price": latest_row.get("Close"),
-        "volume": latest_row.get("Volume"),
-    }
-
-    timestamp = _coerce_timestamp(latest_row.name)
-
-    raw: Dict[str, Any] = {"timestamp": timestamp}
-    for field in ("Open", "High", "Low", "Close", "Volume"):
+# -----------------------------
+# Kafka
+# -----------------------------
+def _create_producer() -> KafkaProducer:
+    LOGGER.info("Connecting KafkaProducer to %s", KAFKA_BROKER)
+    delay = KAFKA_CONNECT_INITIAL_DELAY
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, KAFKA_CONNECT_RETRIES + 1):
         try:
-            raw[field] = _to_float(latest_row.get(field))
-        except Exception:  # pylint: disable=broad-except
-            continue
+            kwargs = dict(
+                bootstrap_servers=[KAFKA_BROKER],
+                request_timeout_ms=20000,
+                reconnect_backoff_ms=500,
+                reconnect_backoff_max_ms=5000,
+                value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+                key_serializer=lambda v: v.encode("utf-8") if v else None,
+            )
+            if KAFKA_API_VERSION:
+                kwargs["api_version"] = KAFKA_API_VERSION
+            return KafkaProducer(**kwargs)
+        except Exception as e:
+            last_exc = e
+            LOGGER.warning("Kafka not ready (attempt %d/%d): %s", attempt, KAFKA_CONNECT_RETRIES, e)
+            time.sleep(delay)
+            delay = min(delay * 1.5, KAFKA_CONNECT_MAX_DELAY)
+    raise RuntimeError(f"Failed to create KafkaProducer after retries: {last_exc}")
 
-    return {
-        "timestamp": timestamp,
-        "pricing": pricing,
-        "raw": raw,
-    }
+
+def _publish_message(producer: KafkaProducer, topic: str, payload: Dict[str, Any]) -> None:
+    vendor = payload.get("vendor", "unknown")
+    try:
+        producer.send(topic, key=payload.get("symbol"), value=payload)
+        PUBLISH_SUCCESS.labels(vendor=vendor).inc()
+    except Exception as exc:
+        PUBLISH_FAILURE.labels(vendor=vendor).inc()
+        LOGGER.exception("Failed to publish message to %s: %s", topic, exc)
+        raise
 
 
-def fetch_yfinance_quote(symbol: str) -> Dict[str, Any]:
-    ticker = yf.Ticker(symbol)
-    info_dict = _safe_get_fast_info(symbol, ticker)
-    pricing = _pricing_from_fast_info(info_dict)
-    timestamp: Optional[str] = None
+# -----------------------------
+# HTTP session (Binance) with retry
+# -----------------------------
+def _build_session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update({"User-Agent": os.getenv("HTTP_USER_AGENT", "market-ingestor/1.0")})
+    retry = Retry(
+        total=HTTP_TOTAL_RETRIES,
+        backoff_factor=0.3,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "HEAD"],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
 
-    history = None
-    if not any(
-        pricing.get(field) is not None for field in ("price", "close", "open", "high", "low")
-    ):
-        history = _history_snapshot(symbol, ticker)
-        if not history:
-            raise RuntimeError(f"No pricing data returned for {symbol}")
-        pricing.update({k: v for k, v in history["pricing"].items() if v is not None})
-        timestamp = history.get("timestamp")
-    else:
-        history = _history_snapshot(symbol, ticker)
-        if history:
-            timestamp = history.get("timestamp")
-            for key, value in history["pricing"].items():
-                if pricing.get(key) is None and value is not None:
-                    pricing[key] = value
 
-    payload = _normalize_payload(
-        "yfinance", symbol, timestamp or datetime.utcnow().isoformat(), pricing
+SESSION = _build_session()
+
+
+def _read_retry_after(resp: requests.Response) -> float:
+    ra = resp.headers.get("Retry-After")
+    if not ra:
+        return 0.0
+    try:
+        return float(ra)
+    except Exception:
+        return 0.0
+
+
+def _same_host(a: str, b: str) -> bool:
+    return urlparse(a).netloc.lower() == urlparse(b).netloc.lower()
+
+
+def _get_json_one_host(host: str, path: str, *, params: Optional[Dict[str, Any]] = None) -> Any:
+    """Fetch JSON from one host. Allow redirects (compat with old requests), then block cross-host hops."""
+    base = f"https://{host}{path if path.startswith('/') else '/' + path}"
+    BINANCE_HOST_ATTEMPTS.labels(host=host).inc()
+
+    # DO NOT pass allow_redirects (breaks older requests/adapter combos). Use default behavior.
+    r = SESSION.get(base, params=params, timeout=HTTP_TIMEOUT)
+
+    # Block cross-host redirects (e.g., to www.binance.com/en HTML)
+    final_url = r.url
+    if r.history:
+        # If any redirect in the chain changes host, reject
+        chain = [h.headers.get("Location", "") or h.url for h in r.history] + [final_url]
+        hosts_in_chain = [urlparse(u).netloc for u in chain if u]
+        if any(not _same_host(base, u) for u in chain):
+            LOGGER.error("Cross-host redirect blocked: %s -> %s (chain hosts=%s)", base, final_url, hosts_in_chain)
+            BINANCE_HTTP_ERRORS.labels(status_code=str(getattr(r, "status_code", 0) or 0)).inc()
+            raise RuntimeError("Cross-host redirect blocked")
+
+    ct = r.headers.get("Content-Type", "")
+
+    if r.status_code == 429:
+        BINANCE_HTTP_ERRORS.labels(status_code=str(r.status_code)).inc()
+        backoff = max(RETRY_BACKOFF_SECONDS, _read_retry_after(r))
+        LOGGER.warning("Binance 429 at %s; backing off %.1fs", r.url, backoff)
+        time.sleep(backoff)
+        raise RuntimeError("Rate limited")
+
+    if not r.ok:
+        BINANCE_HTTP_ERRORS.labels(status_code=str(r.status_code)).inc()
+        LOGGER.error("Binance %s -> %s %s; body[:200]=%r", r.url, r.status_code, ct, r.text[:200])
+        raise RuntimeError(f"HTTP {r.status_code}")
+
+    if "application/json" not in ct.lower():
+        LOGGER.error("Unexpected Content-Type for %s: %s; body[:200]=%r", r.url, ct, r.text[:200])
+        raise RuntimeError("Non-JSON response")
+
+    LOGGER.debug("Fetched %d bytes from %s", len(r.content), r.url)
+    try:
+        return r.json()
+    except Exception:
+        LOGGER.error("JSON parse error for %s; body[:200]=%r", r.url, r.text[:200])
+        raise
+
+
+def _get_json_any_host(
+    hosts: Sequence[str],
+    path: str,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+    per_host_attempts: int = 2,
+) -> Any:
+    last_exc: Optional[Exception] = None
+    for host in hosts:
+        for _ in range(per_host_attempts):
+            try:
+                return _get_json_one_host(host, path, params=params)
+            except Exception as e:
+                last_exc = e
+                time.sleep(0.4)
+        LOGGER.info("Host %s did not yield JSON; rotating to next host", host)
+    raise RuntimeError(f"All hosts failed for {path}: {last_exc}")
+
+
+# -----------------------------
+# Binance fetchers
+# -----------------------------
+def fetch_binance_symbol(symbol: str) -> Dict[str, Any]:
+    return _get_json_any_host(BINANCE_HOSTS, BINANCE_PATH, params={"symbol": symbol.upper()})
+
+
+def fetch_binance_tickers() -> List[Dict[str, Any]]:
+    if BINANCE_SYMBOLS:
+        return [fetch_binance_symbol(s) for s in BINANCE_SYMBOLS]
+    data = _get_json_any_host(BINANCE_HOSTS, BINANCE_PATH)
+    if isinstance(data, dict):
+        for key in ("data", "symbols", "tickers", "items"):
+            nested = data.get(key)
+            if isinstance(nested, list):
+                data = nested
+                break
+        else:
+            raise ValueError("Unexpected response format from Binance endpoint (dict)")
+    if not isinstance(data, list):
+        raise ValueError(f"Binance endpoint response was not a list, got {type(data)}")
+    return data
+
+
+# -----------------------------
+# Normalization
+# -----------------------------
+def _normalize_binance_ticker(ticker: Dict[str, Any]) -> Dict[str, Any]:
+    symbol = str(ticker.get("symbol", "")).strip()
+    if not symbol:
+        raise ValueError("Ticker payload missing symbol")
+
+    timestamp = _coerce_timestamp(
+        ticker.get("closeTime") or ticker.get("eventTime") or ticker.get("close_time") or ticker.get("event_time")
     )
 
-    raw: Dict[str, Any] = {"fast_info": info_dict}
-    if history:
-        raw["history"] = history["raw"]
-    payload["raw"] = raw
+    pricing = {
+        "open": ticker.get("openPrice") or ticker.get("open_price"),
+        "high": ticker.get("highPrice") or ticker.get("high_price"),
+        "low": ticker.get("lowPrice") or ticker.get("low_price"),
+        "close": ticker.get("prevClosePrice") or ticker.get("prev_close_price"),
+        "price": ticker.get("lastPrice") or ticker.get("last_price"),
+        "volume": ticker.get("volume"),
+        "currency": ticker.get("quoteAsset") or ticker.get("quote_asset"),
+    }
+
+    payload = _normalize_payload("binance", symbol, timestamp, pricing)
+    payload["raw"] = ticker
     return payload
 
 
-def fetch_with_retry(vendor: str, func, *args, **kwargs) -> Dict[str, Any]:
+# -----------------------------
+# Retry wrapper
+# -----------------------------
+def fetch_with_retry(vendor: str, func, *args, **kwargs):
     delay = RETRY_BACKOFF_SECONDS
     last_exception: Optional[Exception] = None
     for attempt in range(1, MAX_RETRIES + 1):
@@ -261,46 +342,44 @@ def fetch_with_retry(vendor: str, func, *args, **kwargs) -> Dict[str, Any]:
             FETCH_SUCCESS.labels(vendor=vendor).inc()
             FETCH_LATENCY.labels(vendor=vendor).observe(time.time() - start_time)
             return result
-        except Exception as exc:  # pylint: disable=broad-except
+        except Exception as exc:
             last_exception = exc
             FETCH_FAILURE.labels(vendor=vendor).inc()
             FETCH_LATENCY.labels(vendor=vendor).observe(time.time() - start_time)
             LOGGER.exception(
-                "Failed to fetch %s data on attempt %s/%s: %s",
-                vendor,
-                attempt,
-                MAX_RETRIES,
-                exc,
+                "Failed to fetch %s data on attempt %s/%s: %s", vendor, attempt, MAX_RETRIES, exc
             )
             if attempt >= MAX_RETRIES:
                 break
             time.sleep(delay)
-            delay *= 2
+            delay = min(delay * 2, 30.0)
     assert last_exception is not None
     raise last_exception
 
 
-def _publish_message(producer: KafkaProducer, topic: str, payload: Dict[str, Any]) -> None:
-    vendor = payload.get("vendor", "unknown")
+# -----------------------------
+# Iteration & main loop
+# -----------------------------
+def _iter_binance_payloads() -> Iterable[Dict[str, Any]]:
     try:
-        producer.send(topic, key=payload.get("symbol"), value=payload)
-        PUBLISH_SUCCESS.labels(vendor=vendor).inc()
-    except Exception as exc:  # pylint: disable=broad-except
-        PUBLISH_FAILURE.labels(vendor=vendor).inc()
-        LOGGER.exception("Failed to publish message to %s: %s", topic, exc)
-        raise
+        tickers = fetch_with_retry("binance", fetch_binance_tickers)
+    except Exception as exc:
+        LOGGER.error("Failed to fetch Binance tickers: %s", exc)
+        return
 
+    symbol_filter = {s.upper() for s in BINANCE_SYMBOLS} if BINANCE_SYMBOLS else None
 
-def _iter_yfinance_payloads() -> Iterable[Dict[str, Any]]:
-    for symbol in YFINANCE_SYMBOLS:
-        if not symbol:
+    for ticker in tickers:
+        if not isinstance(ticker, dict):
+            LOGGER.error("Unexpected ticker shape: %r", ticker)
+            continue
+        symbol = str(ticker.get("symbol", "")).upper()
+        if symbol_filter and symbol not in symbol_filter:
             continue
         try:
-            yield fetch_with_retry("yfinance", fetch_yfinance_quote, symbol)
-        except Exception as exc:  # pylint: disable=broad-except
-            LOGGER.error(
-                "Skipping symbol %s after failed fetch: %s", symbol, exc
-            )
+            yield _normalize_binance_ticker(ticker)
+        except Exception as exc:
+            LOGGER.error("Skipping Binance symbol %s after normalization error: %s", symbol or "<unknown>", exc)
 
 
 def run_worker(stop_event: threading.Event) -> None:
@@ -310,13 +389,11 @@ def run_worker(stop_event: threading.Event) -> None:
     cycle_count = 0
     try:
         while not stop_event.is_set():
-            for payload in _iter_yfinance_payloads():
+            for payload in _iter_binance_payloads():
                 try:
-                    _publish_message(producer, YFINANCE_TOPIC, payload)
+                    _publish_message(producer, MARKET_DATA_TOPIC, payload)
                 except Exception:
-                    LOGGER.error(
-                        "Error publishing payload for vendor %s", payload.get("vendor")
-                    )
+                    LOGGER.error("Error publishing payload for vendor %s", payload.get("vendor"))
             cycle_count += 1
             if cycle_count % FLUSH_EVERY == 0:
                 LOGGER.debug("Flushing Kafka producer")
@@ -333,7 +410,7 @@ def run_worker(stop_event: threading.Event) -> None:
 def main() -> None:
     stop_event = threading.Event()
 
-    def _signal_handler(signum, frame):  # pylint: disable=unused-argument
+    def _signal_handler(signum, frame):  # noqa: ARG001
         LOGGER.info("Received signal %s; initiating shutdown", signum)
         stop_event.set()
 

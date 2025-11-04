@@ -1,4 +1,4 @@
-version: "3.9"
+
 
 services:
   zookeeper:
@@ -119,10 +119,11 @@ services:
       - prometheus
     environment:
       KAFKA_BROKER: kafka:9092
-      YFINANCE_SYMBOLS: AAPL,MSFT,GOOGL
-      ALPHAVANTAGE_API_KEY: "demo"
-      QUANDL_API_KEY: "demo"
-      METRICS_PORT: "8000"
+      KAFKA_API_VERSION: "2.5.0"
+      BINANCE_SYMBOLS: "BTCUSDT,ETHUSDT"
+      BINANCE_HOSTS: "data-api.binance.vision,api.binance.com,api1.binance.com,api-gcp.binance.com,api.binance.us"
+      LOG_LEVEL: INFO
+
     restart: unless-stopped
     ports:
       - "8000:8000"
