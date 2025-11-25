@@ -130,12 +130,63 @@ services:
     env_file:
       - ./ingestion/.env
     environment:
-      # explicit overrides / safe defaults (env_file provides the rest)
       KAFKA_BROKER: ${KAFKA_BROKER:-kafka:9092}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     restart: unless-stopped
     ports:
       - "8000:8000"
+    networks: [finnet]
+
+  trades-consumer:
+    build:
+      context: ./consumers
+      dockerfile: Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cockroachdb-node1:
+        condition: service_started
+    environment:
+      KAFKA_BROKER: ${KAFKA_BROKER:-kafka:9092}
+      KAFKA_TOPIC: market.trades.raw
+      KAFKA_GROUP: trades-cockroach-consumer
+      COCKROACH_DSN: postgresql://root@cockroachdb-node1:26257/market?sslmode=disable
+      POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/market
+      ENABLE_DUAL_WRITE: ${ENABLE_DUAL_WRITE:-true}
+      BATCH_SIZE: ${CONSUMER_BATCH_SIZE:-10}
+      HEALTH_PORT: 8091
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8091/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks: [finnet]
+
+  book-consumer:
+    build:
+      context: ./consumers
+      dockerfile: Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cockroachdb-node1:
+        condition: service_started
+    environment:
+      KAFKA_BROKER: ${KAFKA_BROKER:-kafka:9092}
+      KAFKA_TOPIC: market.book_ticker.raw
+      KAFKA_GROUP: book-cockroach-consumer
+      COCKROACH_DSN: postgresql://root@cockroachdb-node1:26257/market?sslmode=disable
+      POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/market
+      ENABLE_DUAL_WRITE: ${ENABLE_DUAL_WRITE:-true}
+      BATCH_SIZE: ${CONSUMER_BATCH_SIZE:-500}
+      HEALTH_PORT: 8092
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8092/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
     networks: [finnet]
 
   node-exporter:
