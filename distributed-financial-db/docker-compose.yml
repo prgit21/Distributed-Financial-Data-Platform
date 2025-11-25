@@ -83,16 +83,46 @@ services:
     command: init --insecure --host=cockroachdb-node1
     networks: [finnet]
 
+  # Apply Cockroach schema from db/schema_cockroach.sql
+    # Apply Cockroach schema from db/schema_cockroach.sql
+    # Apply Cockroach schema from db/schema_cockroach.sql
+    # Apply Cockroach schema from db/schema_cockroach.sql
+  cockroach-schema:
+    image: cockroachdb/cockroach:v23.2.5
+    depends_on:
+      cockroach-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./db/schema_cockroach.sql:/schema.sql:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      echo "Waiting for CockroachDB to be ready..."
+      for i in $(seq 1 30); do
+        /cockroach/cockroach sql --insecure --host=cockroachdb-node1 -e 'SELECT 1' && break
+        echo "CockroachDB not ready yet... retrying..."
+        sleep 2
+      done
+      echo "Creating database market (if not exists)..."
+      /cockroach/cockroach sql --insecure --host=cockroachdb-node1 \
+        -e "CREATE DATABASE IF NOT EXISTS market"
+      echo "Applying schema to market from /schema.sql..."
+      /cockroach/cockroach sql --insecure --host=cockroachdb-node1 \
+        -d market --file=/schema.sql
+    networks: [finnet]
+
+
+
   postgres:
     image: postgres:15
     environment:
-      POSTGRES_DB: financial
+      POSTGRES_DB: market
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./db/postgres_schema.sql:/docker-entrypoint-initdb.d/postgres_schema.sql:ro
     networks: [finnet]
 
   prometheus:
@@ -144,8 +174,8 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-      cockroachdb-node1:
-        condition: service_started
+      cockroach-schema:
+        condition: service_completed_successfully
     environment:
       KAFKA_BROKER: ${KAFKA_BROKER:-kafka:9092}
       KAFKA_TOPIC: market.trades.raw
@@ -170,8 +200,8 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-      cockroachdb-node1:
-        condition: service_started
+      cockroach-schema:
+        condition: service_completed_successfully
     environment:
       KAFKA_BROKER: ${KAFKA_BROKER:-kafka:9092}
       KAFKA_TOPIC: market.book_ticker.raw
