@@ -1,33 +1,3 @@
-# worker.py
-# Binance (US/global) WebSocket ingestor -> Kafka
-# - Trades stream (@trade) to MARKET_TRADES_TOPIC
-# - Optional top-of-book stream (@bookTicker) to MARKET_BOOK_TOPIC
-# - Prometheus metrics on :METRICS_PORT/metrics
-# - Startup validations (Kafka + topic + basic Binance REST/DNS)
-#
-# Env you likely want in ./ingestion/.env:
-#   BINANCE_WS_BASE=wss://stream.binance.us:9443
-#   BINANCE_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,ADAUSDT,LTCUSDT
-#   WS_SHARD_SIZE=100
-#   MARKET_TRADES_TOPIC=market.trades.raw
-#   MARKET_BOOK_TOPIC=market.book_ticker.raw
-#   ENABLE_BOOK_TICKER=true
-#   KAFKA_BROKER=kafka:9092
-#   KAFKA_LINGER_MS=10
-#   KAFKA_BATCH_SIZE=65536
-#   KAFKA_COMPRESSION=lz4
-#   KAFKA_ACKS=1            # or -1 / all
-#   KAFKA_MAX_IN_FLIGHT=5
-#   KAFKA_RETRIES=10
-#   METRICS_PORT=8000
-#   VALIDATE_ON_START=true
-#   VALIDATE_ONLY=false
-#   BINANCE_HOSTS=api.binance.us
-#
-# Notes:
-# - If you’re in the U.S., use .us base to avoid HTTP 451 from binance.com
-# - Some symbols don’t exist on Binance US; unsupported pairs will simply be silent.
-
 import asyncio
 import os
 import json

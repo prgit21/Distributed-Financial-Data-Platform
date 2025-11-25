@@ -83,16 +83,46 @@ services:
     command: init --insecure --host=cockroachdb-node1
     networks: [finnet]
 
+  # Apply Cockroach schema from db/schema_cockroach.sql
+    # Apply Cockroach schema from db/schema_cockroach.sql
+    # Apply Cockroach schema from db/schema_cockroach.sql
+    # Apply Cockroach schema from db/schema_cockroach.sql
+  cockroach-schema:
+    image: cockroachdb/cockroach:v23.2.5
+    depends_on:
+      cockroach-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./db/schema_cockroach.sql:/schema.sql:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      echo "Waiting for CockroachDB to be ready..."
+      for i in $(seq 1 30); do
+        /cockroach/cockroach sql --insecure --host=cockroachdb-node1 -e 'SELECT 1' && break
+        echo "CockroachDB not ready yet... retrying..."
+        sleep 2
+      done
+      echo "Creating database market (if not exists)..."
+      /cockroach/cockroach sql --insecure --host=cockroachdb-node1 \
+        -e "CREATE DATABASE IF NOT EXISTS market"
+      echo "Applying schema to market from /schema.sql..."
+      /cockroach/cockroach sql --insecure --host=cockroachdb-node1 \
+        -d market --file=/schema.sql
+    networks: [finnet]
+
+
+
   postgres:
     image: postgres:15
     environment:
-      POSTGRES_DB: financial
+      POSTGRES_DB: market
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./db/postgres_schema.sql:/docker-entrypoint-initdb.d/postgres_schema.sql:ro
     networks: [finnet]
 
   prometheus:
@@ -130,12 +160,63 @@ services:
     env_file:
       - ./ingestion/.env
     environment:
-      # explicit overrides / safe defaults (env_file provides the rest)
       KAFKA_BROKER: ${KAFKA_BROKER:-kafka:9092}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     restart: unless-stopped
     ports:
       - "8000:8000"
+    networks: [finnet]
+
+  trades-consumer:
+    build:
+      context: ./consumers
+      dockerfile: Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cockroach-schema:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKER: ${KAFKA_BROKER:-kafka:9092}
+      KAFKA_TOPIC: market.trades.raw
+      KAFKA_GROUP: trades-cockroach-consumer
+      COCKROACH_DSN: postgresql://root@cockroachdb-node1:26257/market?sslmode=disable
+      POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/market
+      ENABLE_DUAL_WRITE: ${ENABLE_DUAL_WRITE:-true}
+      BATCH_SIZE: ${CONSUMER_BATCH_SIZE:-10}
+      HEALTH_PORT: 8091
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8091/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks: [finnet]
+
+  book-consumer:
+    build:
+      context: ./consumers
+      dockerfile: Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cockroach-schema:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKER: ${KAFKA_BROKER:-kafka:9092}
+      KAFKA_TOPIC: market.book_ticker.raw
+      KAFKA_GROUP: book-cockroach-consumer
+      COCKROACH_DSN: postgresql://root@cockroachdb-node1:26257/market?sslmode=disable
+      POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/market
+      ENABLE_DUAL_WRITE: ${ENABLE_DUAL_WRITE:-true}
+      BATCH_SIZE: ${CONSUMER_BATCH_SIZE:-500}
+      HEALTH_PORT: 8092
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8092/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
     networks: [finnet]
 
   node-exporter:
