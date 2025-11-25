@@ -1,0 +1,56 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.3
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.3
+    depends_on: [zookeeper]
+    hostname: kafka
+    container_name: kafka
+    ports:
+      - "29092:29092"   # host access
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_BROKER_ID: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: market
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports: ["5432:5432"]
+    volumes:
+      - ./db/postgres_market.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+
+  pg-sink:
+    image: python:3.11-slim
+    depends_on: [kafka, postgres]
+    working_dir: /app
+    volumes: [ .:/app ]
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092             # <— internal listener matches service name
+      KAFKA_TOPIC_TRADES: binance.trades
+      KAFKA_TOPIC_BOOK:   binance.book_ticker
+      KAFKA_GROUP_ID: pg-sink-binance
+      PG_DSN: postgresql://postgres:postgres@postgres:5432/market
+      BATCH_SIZE: "1000"
+      FLUSH_MS: "1000"
+    command: >
+      bash -lc "
+        apt-get update &&
+        apt-get install -y --no-install-recommends gcc librdkafka-dev &&
+        pip install -r consumers/requirements.txt &&
+        python consumers/pg_sink_binance.py
+      "
