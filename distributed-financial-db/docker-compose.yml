@@ -94,22 +94,11 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./db/schema_cockroach.sql:/schema.sql:ro
-    entrypoint: ["/bin/sh", "-c"]
-    command: |
-      echo "Waiting for CockroachDB to be ready..."
-      for i in $(seq 1 30); do
-        /cockroach/cockroach sql --insecure --host=cockroachdb-node1 -e 'SELECT 1' && break
-        echo "CockroachDB not ready yet... retrying..."
-        sleep 2
-      done
-      echo "Creating database market (if not exists)..."
-      /cockroach/cockroach sql --insecure --host=cockroachdb-node1 \
-        -e "CREATE DATABASE IF NOT EXISTS market"
-      echo "Applying schema to market from /schema.sql..."
-      /cockroach/cockroach sql --insecure --host=cockroachdb-node1 \
-        -d market --file=/schema.sql
+      # Mount the new script file
+      - ./db/init_cockroach.sh:/init_cockroach.sh:ro
+    # Override entrypoint to run our script directly
+    entrypoint: ["/bin/bash", "/init_cockroach.sh"]
     networks: [finnet]
-
 
 
   postgres:
