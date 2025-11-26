@@ -136,9 +136,11 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: admin
     volumes:
       - grafana-data:/var/lib/grafana
+      # Map the YAML configs
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      # Map the JSON dashboard files
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     networks: [finnet]
-
   ingestion-worker:
     build:
       context: ./ingestion
