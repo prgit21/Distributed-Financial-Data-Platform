@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: "Local Dashboards"
+    orgId: 1
+    folder: "General"
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    options:
+      # CRITICAL: This must match where we mount the volume in Docker
+      path: /var/lib/grafana/dashboards
