@@ -1,0 +1,24 @@
+groups:
+  - name: kafka-broker-health
+    rules:
+      - alert: KafkaUnderReplicatedPartitions
+        expr: kafka_server_replicamanager_underreplicatedpartitions > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kafka under-replicated partitions"
+          description: |
+            Broker {{ $labels.instance }} has {{ $value }} under-replicated partitions for more than 5 minutes.
+            Investigate broker health, network connectivity, or disk performance.
+
+      - alert: KafkaControllerElectionChurn
+        expr: rate(kafka_controller_controllerstats_leader_elections_total[10m]) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka controller elections are occurring frequently"
+          description: |
+            Controller elections are happening at a rate of {{ $value | printf "%.2f" }} per second over 10 minutes on {{ $labels.instance }}.
+            Check broker stability, Zookeeper connectivity, and controller logs.

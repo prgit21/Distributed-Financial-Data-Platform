@@ -20,6 +20,7 @@ services:
     ports:
       - "9092:9092"
       # - "29092:29092"  # uncomment if you want host apps to use localhost:29092
+      - "9999:9999"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -29,11 +30,25 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_JMX_PORT: 9999
+      KAFKA_JMX_HOSTNAME: kafka
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "9092"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks: [finnet]
+
+  kafka-jmx-exporter:
+    image: bitnami/jmx-exporter:0.20.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: ["7071", "/config/kafka-2_0_0.yml"]
+    volumes:
+      - ./monitoring/jmx-exporter/kafka-2_0_0.yml:/config/kafka-2_0_0.yml:ro
+    ports:
+      - "7071:7071"
     networks: [finnet]
 
   kafka-exporter:
@@ -118,6 +133,7 @@ services:
     image: prom/prometheus:v2.49.1
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus-rules:/etc/prometheus/rules:ro
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
     ports:

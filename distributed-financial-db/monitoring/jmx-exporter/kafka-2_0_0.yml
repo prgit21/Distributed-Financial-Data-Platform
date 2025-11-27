@@ -1,0 +1,108 @@
+startDelaySeconds: 0
+hostPort: kafka:9999
+username: ""
+password: ""
+jmxUrl: ""
+ssl: false
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+whitelistObjectNames:
+  - kafka.server:*
+  - kafka.network:*
+  - kafka.controller:*
+  - kafka.log:*
+  - java.lang:*
+  - kafka.cluster:*
+
+rules:
+  - pattern: 'kafka.server<type=(.+), name=(.+)PerSec\w*><>Count'
+    name: kafka_server_$1_$2_total
+    help: Kafka server request totals
+    type: COUNTER
+
+  - pattern: 'kafka.server<type=BrokerTopicMetrics, name=(BytesInPerSec|BytesOutPerSec)><>Count'
+    name: kafka_server_brokertopicmetrics_$1_total
+    help: Kafka broker bytes rate totals
+    type: COUNTER
+
+  - pattern: 'kafka.server<type=BrokerTopicMetrics, name=(BytesInPerSec|BytesOutPerSec)><>OneMinuteRate'
+    name: kafka_server_brokertopicmetrics_$1_rate1m
+    help: Kafka broker bytes rate (1m)
+    type: GAUGE
+
+  - pattern: 'kafka.server<type=ReplicaManager, name=(UnderReplicatedPartitions)><>(Value|Count)'
+    name: kafka_server_replicamanager_$1
+    help: Number of under-replicated partitions
+    type: GAUGE
+
+  - pattern: 'kafka.server<type=ReplicaManager, name=(IsrShrinksPerSec|IsrExpandsPerSec)><>Count'
+    name: kafka_server_replicamanager_$1_total
+    help: Kafka ISR change count
+    type: COUNTER
+
+  - pattern: 'kafka.server<type=ReplicaManager, name=(PartitionCount|LeaderCount)><>Value'
+    name: kafka_server_replicamanager_$1
+    help: Kafka partition/leader counts
+    type: GAUGE
+
+  - pattern: 'kafka.network<type=RequestMetrics, name=(RequestsPerSec), request=(.+)><>Count'
+    name: kafka_network_requestmetrics_$2_total
+    help: Kafka request totals by type
+    type: COUNTER
+
+  - pattern: 'kafka.network<type=RequestMetrics, name=(RequestsPerSec), request=(.+)><>OneMinuteRate'
+    name: kafka_network_requestmetrics_$2_rate1m
+    help: Kafka request rate by type (1m)
+    type: GAUGE
+
+  - pattern: 'kafka.controller<type=KafkaController, name=(OfflinePartitionsCount|ActiveControllerCount)><>Value'
+    name: kafka_controller_kafkacontroller_$1
+    help: Kafka controller health gauges
+    type: GAUGE
+
+  - pattern: 'kafka.controller<type=ControllerStats, name=(LeaderElectionRateAndTimeMs)><>Count'
+    name: kafka_controller_controllerstats_leader_elections_total
+    help: Kafka controller leader elections
+    type: COUNTER
+
+  - pattern: 'kafka.log<type=LogFlushStats, name=LogFlushRateAndTimeMs><>Count'
+    name: kafka_log_logflush_total
+    help: Kafka log flush operations
+    type: COUNTER
+
+  - pattern: 'kafka.log<type=LogFlushStats, name=LogFlushRateAndTimeMs><>OneMinuteRate'
+    name: kafka_log_logflush_rate1m
+    help: Kafka log flush rate 1m
+    type: GAUGE
+
+  - pattern: 'java.lang<type=GarbageCollector, name=(.+)><>CollectionTime'
+    name: jvm_gc_collection_time_ms
+    help: JVM GC collection time
+    labels:
+      gc: "$1"
+    type: GAUGE
+
+  - pattern: 'java.lang<type=GarbageCollector, name=(.+)><>CollectionCount'
+    name: jvm_gc_collection_count
+    help: JVM GC collection count
+    labels:
+      gc: "$1"
+    type: COUNTER
+
+  - pattern: 'java.lang<type=Memory><HeapMemoryUsage>(.+):'
+    name: jvm_memory_heap_$1_bytes
+    help: JVM heap memory usage
+    type: GAUGE
+
+  - pattern: 'java.lang<type=Threading><>ThreadCount'
+    name: jvm_threads_current
+    help: Current thread count
+    type: GAUGE
+
+  - pattern: 'kafka.cluster<type=Partition, name=Size, topic=(.+), partition=(.+)><>Value'
+    name: kafka_cluster_partition_size
+    help: Kafka partition log size
+    labels:
+      topic: "$1"
+      partition: "$2"
+    type: GAUGE
