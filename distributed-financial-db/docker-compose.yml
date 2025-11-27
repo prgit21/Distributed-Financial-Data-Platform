@@ -19,36 +19,32 @@ services:
       - zookeeper
     ports:
       - "9092:9092"
-      # - "29092:29092"  # uncomment if you want host apps to use localhost:29092
-      - "9999:9999"
+      - "9999:9999"   # JMX port
+      - "7071:7071"   # Prometheus metrics exposed by JMX agent
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 3
+
+      # --- JMX ---
       KAFKA_JMX_PORT: 9999
       KAFKA_JMX_HOSTNAME: kafka
+
+      # --- JMX PROMETHEUS AGENT ---
+      KAFKA_OPTS: "-javaagent:/opt/jmx/jmx_prometheus_javaagent.jar=7071:/opt/jmx/kafka-jmx.yml"
+    volumes:
+      - ./monitoring/jmx-exporter/kafka-jmx.yml:/opt/jmx/kafka-jmx.yml:ro
+      - ./monitoring/jmx-exporter/jmx_prometheus_javaagent.jar:/opt/jmx/jmx_prometheus_javaagent.jar:ro
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "9092"]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks: [finnet]
-
-  kafka-jmx-exporter:
-    image: bitnami/jmx-exporter:0.20.0
-    depends_on:
-      kafka:
-        condition: service_healthy
-    command: ["7071", "/config/kafka-2_0_0.yml"]
-    volumes:
-      - ./monitoring/jmx-exporter/kafka-2_0_0.yml:/config/kafka-2_0_0.yml:ro
-    ports:
-      - "7071:7071"
     networks: [finnet]
 
   kafka-exporter:
@@ -99,9 +95,9 @@ services:
     networks: [finnet]
 
   # Apply Cockroach schema from db/schema_cockroach.sql
-    # Apply Cockroach schema from db/schema_cockroach.sql
-    # Apply Cockroach schema from db/schema_cockroach.sql
-    # Apply Cockroach schema from db/schema_cockroach.sql
+  # Apply Cockroach schema from db/schema_cockroach.sql
+  # Apply Cockroach schema from db/schema_cockroach.sql
+  # Apply Cockroach schema from db/schema_cockroach.sql
   cockroach-schema:
     image: cockroachdb/cockroach:v23.2.5
     depends_on:
@@ -114,7 +110,6 @@ services:
     # Override entrypoint to run our script directly
     entrypoint: ["/bin/bash", "/init_cockroach.sh"]
     networks: [finnet]
-
 
   postgres:
     image: postgres:15
@@ -157,6 +152,7 @@ services:
       # Map the JSON dashboard files
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     networks: [finnet]
+
   ingestion-worker:
     build:
       context: ./ingestion

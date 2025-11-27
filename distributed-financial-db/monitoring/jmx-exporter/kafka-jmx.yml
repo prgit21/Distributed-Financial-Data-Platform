@@ -1,0 +1,10 @@
+startDelaySeconds: 0
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+
+rules:
+  - pattern: "kafka.server<type=BrokerTopicMetrics, name=(MessagesInPerSec|BytesInPerSec|BytesOutPerSec), topic=(.+)><>Count"
+    name: kafka_server_brokertopicmetrics_$1_total
+    labels:
+      topic: "$2"
+    type: COUNTER
