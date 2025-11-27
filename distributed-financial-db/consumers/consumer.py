@@ -3,6 +3,7 @@ import logging
 import os
 import signal
 import threading
+import time
 from contextlib import contextmanager
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -11,6 +12,12 @@ from typing import Dict, Optional
 import psycopg2
 from kafka import KafkaConsumer
 from psycopg2.extras import execute_batch
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    Counter,
+    Histogram,
+    generate_latest,
+)
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -20,25 +27,68 @@ LOGGER = logging.getLogger("consumer")
 
 
 # ----------------------
-# HTTP health server
+# Metrics
 # ----------------------
-class HealthHandler(BaseHTTPRequestHandler):
+MESSAGES_CONSUMED = Counter(
+    "consumer_messages_consumed_total",
+    "Total messages consumed by topic",
+    labelnames=["topic"],
+)
+
+BATCH_DURATION = Histogram(
+    "consumer_batch_duration_seconds",
+    "Time spent writing a batch to databases",
+    buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10],
+)
+
+DB_WRITE_BATCHES = Counter(
+    "consumer_db_write_batches_total",
+    "Count of database write batches by target and status",
+    labelnames=["target", "status"],
+)
+
+DB_RECONNECTIONS = Counter(
+    "consumer_db_reconnections_total",
+    "Database reconnection attempts",
+    labelnames=["target"],
+)
+
+
+# ----------------------
+# HTTP health/metrics server
+# ----------------------
+class HealthMetricsHandler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
-        if self.path != "/health":
-            self.send_response(404)
-            self.end_headers()
+        if self.path == "/health":
+            self._send_health()
             return
+        if self.path == "/metrics":
+            self._send_metrics()
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
+    def _send_health(self) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
         self.wfile.write(b"ok")
 
+    def _send_metrics(self) -> None:
+        output = generate_latest()
+        self.send_response(200)
+        self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+        self.send_header("Content-Length", str(len(output)))
+        self.end_headers()
+        self.wfile.write(output)
+
     def log_message(self, format, *args):  # noqa: A003
         return
 
 
-def start_health_server(port: int) -> HTTPServer:
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+def start_status_server(port: int) -> HTTPServer:
+    server = HTTPServer(("0.0.0.0", port), HealthMetricsHandler)
 
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -55,17 +105,18 @@ class DualWriter:
         self.cockroach_conn = None
         self.postgres_conn = None
 
-    def _connect(self, dsn: str):
+    def _connect(self, dsn: str, target: str):
+        DB_RECONNECTIONS.labels(target=target).inc()
         return psycopg2.connect(dsn, connect_timeout=5)
 
     def ensure_connections(self) -> None:
         if self.cockroach_conn is None or self.cockroach_conn.closed:
             LOGGER.info("Connecting to CockroachDB ...")
-            self.cockroach_conn = self._connect(self.cockroach_dsn)
+            self.cockroach_conn = self._connect(self.cockroach_dsn, "cockroach")
         if self.postgres_dsn:
             if self.postgres_conn is None or self.postgres_conn.closed:
                 LOGGER.info("Connecting to Postgres for dual writes ...")
-                self.postgres_conn = self._connect(self.postgres_dsn)
+                self.postgres_conn = self._connect(self.postgres_dsn, "postgres")
 
     @contextmanager
     def _cursor(self, use_postgres: bool):
@@ -126,12 +177,22 @@ class DualWriter:
         if self.postgres_conn:
             writers.append((self.postgres_conn, True))
 
-        for _conn, use_postgres in writers:
-            with self._cursor(use_postgres) as cur:
-                if is_trade:
-                    self._write_trades(cur, rows)
-                else:
-                    self._write_book(cur, rows)
+        start = time.monotonic()
+        try:
+            for _conn, use_postgres in writers:
+                target = "postgres" if use_postgres else "cockroach"
+                try:
+                    with self._cursor(use_postgres) as cur:
+                        if is_trade:
+                            self._write_trades(cur, rows)
+                        else:
+                            self._write_book(cur, rows)
+                    DB_WRITE_BATCHES.labels(target=target, status="success").inc()
+                except Exception:
+                    DB_WRITE_BATCHES.labels(target=target, status="failure").inc()
+                    raise
+        finally:
+            BATCH_DURATION.observe(time.monotonic() - start)
 
 
 # ----------------------
@@ -249,7 +310,7 @@ def consume_topic():
         value_deserializer=lambda m: json.loads(m.decode("utf-8")),
     )
 
-    start_health_server(health_port)
+    start_status_server(health_port)
 
     stop_event = threading.Event()
 
@@ -279,6 +340,7 @@ def consume_topic():
                             continue
 
                         buffer.append(parsed)
+                        MESSAGES_CONSUMED.labels(topic=topic).inc()
                     except Exception:
                         LOGGER.exception(
                             "Unexpected error while parsing message, skipping: %s",

@@ -25,3 +25,8 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ['ingestion-worker:8000']
+
+  - job_name: 'consumers'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['trades-consumer:8091', 'book-consumer:8092']
