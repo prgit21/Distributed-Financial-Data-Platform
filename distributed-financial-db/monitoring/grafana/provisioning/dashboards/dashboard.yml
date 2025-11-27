@@ -9,3 +9,4 @@ providers:
     options:
       # CRITICAL: This must match where we mount the volume in Docker
       path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: true
