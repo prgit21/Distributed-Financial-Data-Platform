@@ -124,6 +124,16 @@ services:
       - ./db/postgres_schema.sql:/docker-entrypoint-initdb.d/postgres_schema.sql:ro
     networks: [finnet]
 
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    depends_on:
+      - postgres
+    environment:
+      DATA_SOURCE_NAME: postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable
+    ports:
+      - "9187:9187"
+    networks: [finnet]
+
   prometheus:
     image: prom/prometheus:v2.49.1
     volumes:
