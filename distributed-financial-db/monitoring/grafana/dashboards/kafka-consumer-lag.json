@@ -84,8 +84,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (consumergroup, topic) (kafka_consumergroup_lag{topic=~\"$topic\",consumergroup=~\"$consumergroup\"})",
-          "legendFormat": "{{consumergroup}} ({{topic}})",
+          "expr": "sum by (group, topic) (kafka_consumergroup_lag{topic=~\"$topic\",group=~\"$consumergroup\"})",
+          "legendFormat": "{{group}} ({{topic}})",
           "range": true,
           "refId": "A"
         }
@@ -151,7 +151,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(kafka_consumergroup_lag{topic=~\"$topic\",consumergroup=~\"$consumergroup\"})",
+          "expr": "sum(kafka_consumergroup_lag{topic=~\"$topic\",group=~\"$consumergroup\"})",
           "legendFormat": "",
           "range": true,
           "refId": "A"
@@ -212,7 +212,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum by (consumergroup, topic, partition) (kafka_consumergroup_lag{topic=~\"$topic\",consumergroup=~\"$consumergroup\"})",
+          "expr": "sum by (group, topic, partition) (kafka_consumergroup_lag{topic=~\"$topic\",group=~\"$consumergroup\"})",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -274,7 +274,7 @@
         "name": "consumergroup",
         "options": [],
         "query": {
-          "query": "label_values(kafka_consumergroup_lag, consumergroup)",
+          "query": "label_values(kafka_consumergroup_lag, group)",
           "refId": "Prometheus-cg-Variable-Query"
         },
         "refresh": 1,

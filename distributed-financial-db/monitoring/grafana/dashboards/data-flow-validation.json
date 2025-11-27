@@ -404,7 +404,7 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(kafka_consumergroup_lag) by (consumergroup, topic)"
+          "expr": "sum(kafka_consumergroup_lag) by (group, topic)"
         }
       ],
       "fieldConfig": {
