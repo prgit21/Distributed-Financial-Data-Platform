@@ -105,6 +105,21 @@ class DualWriter:
         self.cockroach_conn = None
         self.postgres_conn = None
 
+    def _connect_with_retry(self, dsn: str, target: str):
+        delay = 1
+        while True:
+            try:
+                return self._connect(dsn, target)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning(
+                    "Failed to connect to %s: %s. Retrying in %s seconds",
+                    target,
+                    exc,
+                    delay,
+                )
+                time.sleep(delay)
+                delay = min(delay * 2, 30)
+
     def _connect(self, dsn: str, target: str):
         DB_RECONNECTIONS.labels(target=target).inc()
         return psycopg2.connect(dsn, connect_timeout=5)
@@ -112,11 +127,15 @@ class DualWriter:
     def ensure_connections(self) -> None:
         if self.cockroach_conn is None or self.cockroach_conn.closed:
             LOGGER.info("Connecting to CockroachDB ...")
-            self.cockroach_conn = self._connect(self.cockroach_dsn, "cockroach")
+            self.cockroach_conn = self._connect_with_retry(
+                self.cockroach_dsn, "cockroach"
+            )
         if self.postgres_dsn:
             if self.postgres_conn is None or self.postgres_conn.closed:
                 LOGGER.info("Connecting to Postgres for dual writes ...")
-                self.postgres_conn = self._connect(self.postgres_dsn, "postgres")
+                self.postgres_conn = self._connect_with_retry(
+                    self.postgres_dsn, "postgres"
+                )
 
     @contextmanager
     def _cursor(self, use_postgres: bool):
@@ -171,28 +190,59 @@ class DualWriter:
             rows,
         )
 
-    def write_rows(self, rows, is_trade: bool) -> None:
-        self.ensure_connections()
-        writers = [(self.cockroach_conn, False)]
+    def _reset_connections(self) -> None:
+        if self.cockroach_conn:
+            try:
+                self.cockroach_conn.close()
+            except Exception:  # noqa: BLE001
+                pass
         if self.postgres_conn:
-            writers.append((self.postgres_conn, True))
+            try:
+                self.postgres_conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self.cockroach_conn = None
+        self.postgres_conn = None
 
-        start = time.monotonic()
-        try:
-            for _conn, use_postgres in writers:
-                target = "postgres" if use_postgres else "cockroach"
+    def write_rows(self, rows, is_trade: bool) -> None:
+        delay = 1
+        while True:
+            try:
+                self.ensure_connections()
+                writers = [(self.cockroach_conn, False)]
+                if self.postgres_conn:
+                    writers.append((self.postgres_conn, True))
+
+                start = time.monotonic()
                 try:
-                    with self._cursor(use_postgres) as cur:
-                        if is_trade:
-                            self._write_trades(cur, rows)
-                        else:
-                            self._write_book(cur, rows)
-                    DB_WRITE_BATCHES.labels(target=target, status="success").inc()
-                except Exception:
-                    DB_WRITE_BATCHES.labels(target=target, status="failure").inc()
-                    raise
-        finally:
-            BATCH_DURATION.observe(time.monotonic() - start)
+                    for _conn, use_postgres in writers:
+                        target = "postgres" if use_postgres else "cockroach"
+                        try:
+                            with self._cursor(use_postgres) as cur:
+                                if is_trade:
+                                    self._write_trades(cur, rows)
+                                else:
+                                    self._write_book(cur, rows)
+                            DB_WRITE_BATCHES.labels(
+                                target=target, status="success"
+                            ).inc()
+                        except Exception:
+                            DB_WRITE_BATCHES.labels(
+                                target=target, status="failure"
+                            ).inc()
+                            raise
+                finally:
+                    BATCH_DURATION.observe(time.monotonic() - start)
+                break
+            except (psycopg2.InterfaceError, psycopg2.OperationalError) as exc:
+                LOGGER.warning(
+                    "Database write failed due to connection issue: %s. Retrying in %s seconds",
+                    exc,
+                    delay,
+                )
+                self._reset_connections()
+                time.sleep(delay)
+                delay = min(delay * 2, 30)
 
 
 # ----------------------
