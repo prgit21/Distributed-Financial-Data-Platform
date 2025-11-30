@@ -16,7 +16,8 @@ services:
   kafka:
     image: confluentinc/cp-kafka:7.5.3
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     ports:
       - "9092:9092"
       - "9999:9999"   # JMX port
@@ -68,6 +69,11 @@ services:
       - "26257:26257"
       - "8080:8080"
     networks: [finnet]
+    healthcheck:
+      test: ["CMD", "cockroach", "node", "status", "--insecure", "--host=cockroachdb-node1:26257"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   cockroachdb-node2:
     image: cockroachdb/cockroach:v23.2.5
@@ -76,6 +82,11 @@ services:
     volumes:
       - cockroach-node2:/cockroach/cockroach-data
     networks: [finnet]
+    healthcheck:
+      test: ["CMD", "cockroach", "node", "status", "--insecure", "--host=cockroachdb-node2:26257"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   cockroachdb-node3:
     image: cockroachdb/cockroach:v23.2.5
@@ -84,13 +95,21 @@ services:
     volumes:
       - cockroach-node3:/cockroach/cockroach-data
     networks: [finnet]
+    healthcheck:
+      test: ["CMD", "cockroach", "node", "status", "--insecure", "--host=cockroachdb-node3:26257"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   cockroach-init:
     image: cockroachdb/cockroach:v23.2.5
     depends_on:
-      - cockroachdb-node1
-      - cockroachdb-node2
-      - cockroachdb-node3
+      cockroachdb-node1:
+        condition: service_healthy
+      cockroachdb-node2:
+        condition: service_healthy
+      cockroachdb-node3:
+        condition: service_healthy
     command: init --insecure --host=cockroachdb-node1
     networks: [finnet]
 

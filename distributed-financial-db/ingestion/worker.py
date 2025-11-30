@@ -7,6 +7,7 @@ import signal
 import socket
 import time
 import urllib.request
+from urllib.parse import urlparse
 from typing import List, Iterable
 
 import websockets
@@ -273,17 +274,38 @@ def _https_ping(url: str, timeout: float = 5.0) -> bool:
         return False
 
 
+def _derive_binance_host_from_ws_base(ws_base: str) -> str:
+    try:
+        parsed = urlparse(ws_base)
+        return parsed.hostname or ""
+    except Exception:
+        return ""
+
+
 def validate_binance_connectivity() -> bool:
     """
     Basic checks: DNS resolution on candidate hosts + GET /api/v3/ping on at least one host.
-    If BINANCE_HOSTS is empty, we skip checks and set FAIL (visible in metrics only).
+    If BINANCE_HOSTS is empty, attempt to derive a host from BINANCE_WS_BASE, otherwise warn only.
     """
-    if not BINANCE_HOSTS:
-        LOG.error("Validation: No BINANCE_HOSTS provided; skipping checks (will show as FAIL)")
-        return False
+    hosts = BINANCE_HOSTS
+    if not hosts:
+        derived_host = _derive_binance_host_from_ws_base(BINANCE_WS_BASE)
+        if derived_host:
+            LOG.warning(
+                "Validation: No BINANCE_HOSTS provided; derived %s from BINANCE_WS_BASE=%s",
+                derived_host,
+                BINANCE_WS_BASE,
+            )
+            hosts = [derived_host]
+        else:
+            LOG.warning(
+                "Validation: No BINANCE_HOSTS provided and unable to derive from BINANCE_WS_BASE=%s; skipping checks",
+                BINANCE_WS_BASE,
+            )
+            return True
 
     ok_any = False
-    for host in BINANCE_HOSTS:
+    for host in hosts:
         dns_ok = _dns_lookup(host)
         if not dns_ok:
             LOG.warning("Validation: DNS lookup failed for %s", host)
