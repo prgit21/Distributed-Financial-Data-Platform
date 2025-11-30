@@ -27,9 +27,9 @@ services:
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 3
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
 
       # --- JMX ---
       KAFKA_JMX_PORT: 9999
@@ -94,10 +94,7 @@ services:
     command: init --insecure --host=cockroachdb-node1
     networks: [finnet]
 
-  # Apply Cockroach schema from db/schema_cockroach.sql
-  # Apply Cockroach schema from db/schema_cockroach.sql
-  # Apply Cockroach schema from db/schema_cockroach.sql
-  # Apply Cockroach schema from db/schema_cockroach.sql
+  
   cockroach-schema:
     image: cockroachdb/cockroach:v23.2.5
     depends_on:
@@ -122,6 +119,11 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./db/postgres_schema.sql:/docker-entrypoint-initdb.d/postgres_schema.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks: [finnet]
 
   postgres-exporter:
