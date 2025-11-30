@@ -11,7 +11,7 @@ from typing import List, Iterable
 
 import websockets
 from kafka import KafkaProducer, KafkaAdminClient
-from kafka.errors import KafkaError
+from kafka.admin import NewTopic
 from prometheus_client import Counter, Histogram, Gauge, start_http_server
 
 
@@ -199,41 +199,61 @@ def validate_symbols() -> bool:
     return ok
 
 
-def validate_kafka_connectivity() -> bool:
+def ensure_kafka_topics(topics: List[str]) -> bool:
     try:
         admin = KafkaAdminClient(
             bootstrap_servers=[h.strip() for h in KAFKA_BROKER.split(",") if h.strip()],
             client_id="ws-ingestor-validate",
         )
-        topics = admin.list_topics()
-        LOG.info("Validation: Kafka reachable, %d topics visible", len(topics))
+        existing_topics = set(admin.list_topics())
+        LOG.info("Validation: Kafka reachable, %d topics visible", len(existing_topics))
         VAL_KAFKA_CONNECT.set(1)
-        return True
     except Exception as e:
         LOG.exception("Validation: Kafka connectivity failed: %s", e)
         VAL_KAFKA_CONNECT.set(0)
         return False
 
-
-def validate_kafka_topic(topic: str) -> bool:
-    try:
-        producer = kafka_producer()
-        parts = producer.partitions_for(topic)
-        if parts is None:
-            LOG.warning("Validation: Topic '%s' not found (partitions_for returned None)", topic)
-            VAL_KAFKA_TOPIC.labels(topic=topic).set(0)
+    missing_topics = [t for t in topics if t not in existing_topics]
+    if missing_topics:
+        LOG.warning("Validation: Missing Kafka topics %s; attempting creation", missing_topics)
+        try:
+            admin.create_topics(
+                new_topics=[NewTopic(name=t, num_partitions=3, replication_factor=1) for t in missing_topics],
+                validate_only=False,
+            )
+            LOG.info("Validation: Created Kafka topics: %s", missing_topics)
+        except Exception as create_exc:
+            LOG.exception("Validation: Failed to create Kafka topics %s: %s", missing_topics, create_exc)
+            for topic in missing_topics:
+                VAL_KAFKA_TOPIC.labels(topic=topic).set(0)
             return False
-        LOG.info("Validation: Topic '%s' available with partitions: %s", topic, sorted(parts))
-        VAL_KAFKA_TOPIC.labels(topic=topic).set(1)
-        return True
-    except KafkaError as ke:
-        LOG.exception("Validation: partitions_for(%s) failed: %s", topic, ke)
-        VAL_KAFKA_TOPIC.labels(topic=topic).set(0)
+
+    try:
+        descs = admin.describe_topics(topics)
+    except Exception as desc_exc:
+        LOG.exception("Validation: Failed to describe Kafka topics %s: %s", topics, desc_exc)
+        for topic in topics:
+            VAL_KAFKA_TOPIC.labels(topic=topic).set(0)
         return False
-    except Exception as e:
-        LOG.exception("Validation: Error checking topic %s: %s", topic, e)
-        VAL_KAFKA_TOPIC.labels(topic=topic).set(0)
-        return False
+
+    ok = True
+    for desc in descs:
+        topic = desc.get("topic")
+        partitions = desc.get("partitions") or []
+        error_code = desc.get("error_code")
+        if error_code or not partitions:
+            LOG.error(
+                "Validation: Topic '%s' unavailable (error_code=%s, partitions=%s)",
+                topic,
+                error_code,
+                partitions,
+            )
+            VAL_KAFKA_TOPIC.labels(topic=topic).set(0)
+            ok = False
+        else:
+            LOG.info("Validation: Topic '%s' available with %d partitions", topic, len(partitions))
+            VAL_KAFKA_TOPIC.labels(topic=topic).set(1)
+    return ok
 
 
 def _dns_lookup(host: str) -> bool:
@@ -288,16 +308,15 @@ def validate_binance_connectivity() -> bool:
 
 def run_all_validations() -> bool:
     sym_ok = validate_symbols()
-    kafka_ok = validate_kafka_connectivity()
-    topic_trades_ok = validate_kafka_topic(TRADES_TOPIC) if kafka_ok else False
-    topic_book_ok = True
-    if ENABLE_BOOK_TICKER and kafka_ok:
-        topic_book_ok = validate_kafka_topic(BOOK_TOPIC)
+    topic_list = [TRADES_TOPIC]
+    if ENABLE_BOOK_TICKER:
+        topic_list.append(BOOK_TOPIC)
+    topics_ok = ensure_kafka_topics(topic_list)
     bin_ok = validate_binance_connectivity()
-    overall = sym_ok and kafka_ok and topic_trades_ok and (topic_book_ok if ENABLE_BOOK_TICKER else True) and bin_ok
+    overall = sym_ok and topics_ok and bin_ok
     LOG.info(
-        "Validation summary: symbols=%s kafka=%s trades_topic=%s book_topic=%s binance=%s => overall=%s",
-        sym_ok, kafka_ok, topic_trades_ok, topic_book_ok, bin_ok, overall
+        "Validation summary: symbols=%s kafka_topics=%s binance=%s => overall=%s",
+        sym_ok, topics_ok, bin_ok, overall
     )
     return overall
 
@@ -383,7 +402,8 @@ async def run():
             LOG.info("VALIDATE_ONLY=%s; exiting with status %d", os.getenv("VALIDATE_ONLY"), 0 if ok else 1)
             raise SystemExit(0 if ok else 1)
         if not ok:
-            LOG.warning("Validation had failures; continuing to run (set VALIDATE_ONLY=true to gate startup)")
+            LOG.error("Validation failed; exiting to avoid dropping downstream writes")
+            raise SystemExit(1)
 
     producer = kafka_producer()
     tasks = []
