@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 import json
 import orjson
 import logging
@@ -152,18 +153,23 @@ def normalize_trade(msg: dict) -> dict:
 
 def normalize_book(msg: dict) -> dict:
     d = msg.get("data", msg)
-    # @bookTicker keys: s,symbol; b,bidPrice; B,bidQty; a,askPrice; A,askQty; u,updateId; E,eventTime
+
+    # Binance @bookTicker: s (symbol), b/B (bid), a/A (ask), u (updateId)
+    # Some variants may not include E (event time), so we fall back to "now".
+    event_time = d.get("E")
+    if event_time is None:
+        event_time = int(time.time() * 1000)
+
     return {
         "vendor": "binance",
         "symbol": d.get("s"),
-        "event_time": d.get("E"),
+        "event_time": event_time,
         "update_id": d.get("u"),
         "bid_price": float(d.get("b")),
         "bid_qty": float(d.get("B")),
         "ask_price": float(d.get("a")),
         "ask_qty": float(d.get("A")),
     }
-
 
 def kafka_producer() -> KafkaProducer:
     return KafkaProducer(
