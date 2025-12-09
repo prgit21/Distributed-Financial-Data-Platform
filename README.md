@@ -2,11 +2,11 @@
 
 **Real-Time Streaming Ingestion & Observability Stack**
 
-A **distributed, fault-tolerant financial data platform** for ingesting, streaming, and observing **real-time market data** using **Kafka-based event pipelines**, **transactionally consistent storage**, and **production-style observability**.
+A **distributed, fault-tolerant financial data platform** for ingesting, streaming, and observing **real-time market data** using **Kafka-based event pipelines**, **transactionally consistent storage**, and **production-grade observability**.
 
-The system ingests live market data via WebSockets, publishes normalized events to Kafka topics, and exposes operational health via Prometheus and Grafana.
+The system ingests live market data via WebSockets, publishes normalized events to Kafka topics, and exposes operational health through Prometheus and Grafana. Design decisions explicitly prioritize **correctness, consistency, and operational transparency**.
 
-Built with **Apache Kafka**, **Dockerized ingestion workers**, **CockroachDB / PostgreSQL**, **Prometheus**, and **Grafana**.
+Built using **Apache Kafka**, **Dockerized ingestion workers**, **CockroachDB / PostgreSQL**, **Prometheus**, and **Grafana**.
 
 ---
 
@@ -14,50 +14,124 @@ Built with **Apache Kafka**, **Dockerized ingestion workers**, **CockroachDB / P
 
 ### Core Components
 
-* **Streaming ingestion worker**
+**Streaming Ingestion Worker**
 
-  * Connects to live market data WebSocket feeds
-  * Normalizes and publishes events to Kafka topics
-* **Kafka event backbone**
+* Connects to live market data WebSocket feeds
+* Normalizes trade and order book events
+* Publishes events to Kafka topics with stable keys
 
-  * Decouples producers and consumers
-  * Supports high-throughput, low-latency message streams
-* **Transactional storage**
+**Kafka Event Backbone**
 
-  * PostgreSQL / CockroachDB for durable, strongly consistent storage
-* **Observability stack**
+* Decouples producers and consumers
+* Provides ordered, append-only logs per partition
+* Enables high-throughput, low-latency streaming
 
-  * Prometheus metrics exported by ingestion workers
-  * Grafana dashboards for throughput, lag, and failure analysis
-* **Containerized deployment**
+**Transactional Storage**
 
-  * Entire stack runs via Docker Compose with health checks
+* **PostgreSQL / CockroachDB** for durable persistence
+* Serializable isolation for correctness under concurrency
+
+**Observability Stack**
+
+* Prometheus metrics exported by ingestion workers
+* Grafana dashboards for throughput, errors, and system health
+
+**Containerized Deployment**
+
+* Entire stack runs via Docker Compose
+* Services gated by health checks for deterministic startup
 
 ---
 
 ## Data Flow
 
-1. **Ingest**
+### 1. Ingest
 
-   * WebSocket clients connect to market data feeds
-   * Trades and book updates received in real time
+* WebSocket clients connect to live market feeds
+* Trade ticks and top-of-book updates received in real time
 
-2. **Publish**
+### 2. Publish
 
-   * Events are normalized and published to **Kafka topics**
+* Events are normalized and published to Kafka topics:
 
-     * `market.trades.raw`
-     * `market.book_ticker.raw`
+  * `market.trades.raw`
+  * `market.book_ticker.raw`
 
-3. **Persist (optional consumers)**
+### 3. Persist (Optional Consumers)
 
-   * Downstream consumers can persist to PostgreSQL / CockroachDB
-   * Serializable transactions supported for correctness
+* Downstream consumers persist data to PostgreSQL / CockroachDB
+* Writes execute under **serializable transactions**
 
-4. **Observe**
+### 4. Observe
 
-   * Ingestion workers export Prometheus metrics
-   * Grafana dashboards visualize throughput, failures, and system health
+* Ingestion workers export Prometheus metrics
+* Grafana visualizes ingestion rate, failures, and Kafka publish health
+
+---
+
+## Consistency, Sharding, and Guarantees
+
+### Event Ordering & Serialization
+
+* Kafka guarantees **ordered event delivery per partition**
+* Events are keyed by symbol, ensuring deterministic ordering per asset
+* Downstream persistence executes under **serializable isolation**
+* Concurrent consumers observe results equivalent to a total transaction order
+
+Result: **No lost updates, write skew, or partial state application**
+
+---
+
+### Sharding Strategy
+
+**Kafka (Compute Sharding)**
+
+* Keys (e.g., symbol) determine partition assignment
+* Enables parallel ingestion and consumer scaling
+* Maintains partition-local ordering without global coordination
+
+**CockroachDB (Storage Sharding)**
+
+* Data automatically split into ranges and distributed across nodes
+* Ranges replicated via Raft consensus
+* Rebalancing occurs transparently under load
+
+ Result: horizontal scalability without sacrificing correctness
+
+---
+
+### Fault Tolerance & Replication
+
+* **Kafka**
+
+  * Partition replication across brokers
+  * Producer retries and acknowledgement policies
+* **CockroachDB**
+
+  * Multi-replica data ranges
+  * Consensus-based replication survives node failures
+* **Ingestion Workers**
+
+  * Stateless, restart-safe, horizontally scalable
+
+ Result: component failures do not corrupt pipeline state
+
+---
+
+## CAP Theorem Trade-offs
+
+This platform intentionally prioritizes **Consistency and Availability (CP)** for financial correctness.
+
+| Layer             | CAP Behavior                          |
+| ----------------- | ------------------------------------- |
+| Kafka             | AP with strong per-partition ordering |
+| CockroachDB       | CP (strong consistency via consensus) |
+| End-to-end system | CP-biased                             |
+
+### Practical Implication
+
+* Under network partitions, writes may block briefly instead of returning inconsistent results
+* Correctness is favored over stale or contradictory financial state
 
 ---
 
@@ -71,12 +145,12 @@ Built with **Apache Kafka**, **Dockerized ingestion workers**, **CockroachDB / P
 **Ingestion**
 
 * Python-based Kafka producers
-* WebSocket consumers (market data)
+* WebSocket consumers for market feeds
 
 **Data Stores**
 
 * PostgreSQL
-* CockroachDB (sharded, replicated SQL)
+* CockroachDB (replicated, sharded SQL)
 
 **Observability**
 
@@ -105,7 +179,6 @@ Built with **Apache Kafka**, **Dockerized ingestion workers**, **CockroachDB / P
 ```bash
 git clone <repo>
 cd <project-root>
-
 docker compose up -d --build
 ```
 
@@ -150,14 +223,14 @@ docker compose exec ingestion-worker sh -lc \
 'echo $BINANCE_WS_BASE && echo $BINANCE_SYMBOLS'
 ```
 
-### Check Kafka topics
+### List Kafka topics
 
 ```bash
 docker compose exec kafka bash -lc \
 'kafka-topics --bootstrap-server kafka:9092 --list'
 ```
 
-### Tail live events
+### Tail live trade events
 
 ```bash
 docker compose exec kafka bash -lc \
@@ -175,8 +248,8 @@ BTCUSDT {"symbol":"BTCUSDT","price":...,"qty":...}
 
 ## Observability
 
-* **Prometheus**: [http://localhost:9090](http://localhost:9090)
-* **Grafana**: [http://localhost:3000](http://localhost:3000) (admin / admin)
+* Prometheus: [http://localhost:9090](http://localhost:9090)
+* Grafana: [http://localhost:3000](http://localhost:3000) (admin / admin)
 
 Key metrics:
 
@@ -184,22 +257,29 @@ Key metrics:
 * `kafka_publish_success_total`
 * `vendor_fetch_failure_total`
 
-Use these to validate:
-
-* Ingestion rate
-* Kafka publish reliability
-* Failure patterns across shards
+These reveal ingestion rate, Kafka publish reliability, and shard-level failures.
 
 ---
 
 ## Scaling & Tuning
 
-* Increase `BINANCE_SYMBOLS` for higher volume
-* Enable book ticker for high-frequency updates
+* Increase `BINANCE_SYMBOLS` for higher throughput
+* Enable book ticker streams for high-frequency data
 * Tune producer settings:
 
   * Lower latency: `KAFKA_LINGER_MS=0`
   * Higher throughput: increase batch size
-* Scale WebSocket shards via `WS_SHARD_SIZE`
+* Scale WebSocket ingestion via `WS_SHARD_SIZE`
 
 ---
+
+## Why This Project Matters
+
+This platform demonstrates:
+
+* **Event-driven distributed system design**
+* **Strong consistency under concurrency**
+* **Kafka-backed stream processing**
+* **Operational observability in production systems**
+* Explicit reasoning about **sharding, replication, and CAP trade-offs**
+
